@@ -33,6 +33,7 @@ sub getblob($) {
 	}
 	my $path = $localprefix . gitpath($hash);
 	if (-e $path) {
+		$seen{$hash} = $path;
 		return $path;
 	}
 	my $url = $baseurl . gitpath($hash);
@@ -96,7 +97,7 @@ if ($refname =~ /[^0-9a-f]/) {		# we're not dealing with a commit hash, but with
 	getblob($commit);
 	open(my $updateref, "-|", $git, "update-ref", "--", $refname, $commit);
 	unless ($refname =~ /\.\./) {
-		open(my $mkdir, "-|", $mkdir, "-p", "--", "logs/" . $refname);
+		open(my $mkdir, "-|", $mkdir, "-p", "--", $localprefix . "logs/" . $refname);
 		getstore($baseurl . "logs/" . $refname, $localprefix . "logs/" . $refname);
 	}
 }
