@@ -6,11 +6,17 @@ use LWP::Simple;
 use File::Basename;
 
 our $baseurl;
+our $localprefix;
+our %seen;
+our $git = `which git` || $ENV{GIT_PATH} || die "Git command-line utility not found. Set GIT_PATH=/path/to/git.\n";
+chomp $git;
+our $mkdir = `which mkdir` || "mkdir";	# could be a shell builtin, so if which doesn't give us something, trust it exists.
+chomp $mkdir;
 
 sub gitpath($) {
 	my $hash = shift;
 	$hash =~ /^(..)(.*)$/ or die 'no match on simple regex on hash';
-	return ".git/objects/$1/$2";
+	return "objects/$1/$2";
 }
 
 sub slurp($) {
@@ -22,15 +28,18 @@ sub slurp($) {
 
 sub getblob($) {
 	my $hash = shift;
-	my $path = gitpath($hash);
-	if(-e $path) {
-		print "Got $path from cache\n";
+	if (exists($seen{$hash})) {
+		return $seen{$hash};
+	}
+	my $path = $localprefix . gitpath($hash);
+	if (-e $path) {
 		return $path;
 	}
-	print "Fetching $hash\n";
-	my $url = $baseurl . $path;
+	my $url = $baseurl . gitpath($hash);
+	print "Fetching $hash from $url\n";
 	mkdir(dirname($path));
 	getstore($url, $path);
+	$seen{$hash} = $path;
 	return $path;
 }
 
@@ -42,14 +51,17 @@ sub gettree($) {
 	my $tree;
 	Compress::Raw::Zlib::Inflate->new()->inflate($raw, $tree);
 	die "Tree invalid" unless $tree =~ /^tree \d+\0/;
-	my @cont = `git ls-tree $hash`;
-	for my $line (@cont) {
-		chomp($line);
-		print "Handling tree line: $line\n";
-		$line =~ /^\d+ (tree|blob) ([a-f0-9]*)/ or die "Bad tree entry '$line'!\n";
-		print "Got a $1 of hash $2\n";
-		gettree($2) if $1 eq "tree";
-		getblob($2) if $1 eq "blob";
+	open(my $handle, "-|", $git, "ls-tree", "--", $hash);
+	while (<$handle>) {
+		chomp;
+		/^\d+ (tree|blob) ([a-f0-9]*)/ or die "Bad tree entry '$_'!\n";
+		if ($1 eq "tree") {
+			gettree($2);
+		} elsif ($1 eq "blob") {
+			getblob($2);
+		} else {
+			print "Tree entry of type $1?\n";
+		}
 	}
 }
 
@@ -67,14 +79,34 @@ sub getcommit($) {
 }
 
 sub usage {
-	die "Usage: git init foo;cd foo;$0 http://example.com/gitrepo/ <hash>;git checkout <hash>\n"
+	die	"Usage: git init foo;cd foo;$0 http://example.com/gitrepo/.git/ refs/heads/master [bare repo path];git checkout master;\n" .
+		"Uses git command-line tools: update-ref, ls-tree."
 }
 
-usage unless @ARGV == 2;
+usage unless @ARGV >= 2 && @ARGV <= 3;
 
 $baseurl = shift;
-my $firsthash = shift;
+my $commit = my $refname = shift;
+$localprefix = shift() // ".git/";	# default to the path for a non-bare repo's contents
+if ($refname =~ /[^0-9a-f]/) {		# we're not dealing with a commit hash, but with a ref name
+	my $url = $baseurl . $refname;
+	$commit = get($url);
+	chomp($commit);
+	die "Got something that doesn't look like a commit ID from ref name\n" if $commit =~ /[^0-9a-f]/;
+	getblob($commit);
+	open(my $updateref, "-|", $git, "update-ref", "--", $refname, $commit);
+	unless ($refname =~ /\.\./) {
+		open(my $mkdir, "-|", $mkdir, "-p", "--", "logs/" . $refname);
+		getstore($baseurl . "logs/" . $refname, $localprefix . "logs/" . $refname);
+	}
+}
 
-getcommit($firsthash);
+mkdir($localprefix . "logs");
+mkdir($localprefix . "objects/info");
+for my $path ("config", "HEAD", "description", "logs/HEAD", "index", "orig-head", "packed-refs", "objects/info/packs") { # Mirror some basic files from the remote
+	getstore($baseurl . $path, $localprefix . $path);
+}
+
+getcommit($commit);
 
 print "Done!\n";
