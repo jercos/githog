@@ -1,0 +1,80 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Compress::Raw::Zlib;
+use LWP::Simple;
+use File::Basename;
+
+our $baseurl;
+
+sub gitpath($) {
+	my $hash = shift;
+	$hash =~ /^(..)(.*)$/ or die 'no match on simple regex on hash';
+	return ".git/objects/$1/$2";
+}
+
+sub slurp($) {
+	my $filename = shift;
+	local $/;
+	open(my $handle, "<", $filename) or die "Could not open $filename: $!\n";
+	return <$handle>;
+}
+
+sub getblob($) {
+	my $hash = shift;
+	my $path = gitpath($hash);
+	if(-e $path) {
+		print "Got $path from cache\n";
+		return $path;
+	}
+	print "Fetching $hash\n";
+	my $url = $baseurl . $path;
+	mkdir(dirname($path));
+	getstore($url, $path);
+	return $path;
+}
+
+sub gettree($);
+sub gettree($) {
+	my $hash = shift;
+	my $path = getblob($hash);
+	my $raw = slurp($path);
+	my $tree;
+	Compress::Raw::Zlib::Inflate->new()->inflate($raw, $tree);
+	die "Tree invalid" unless $tree =~ /^tree \d+\0/;
+	my @cont = `git ls-tree $hash`;
+	for my $line (@cont) {
+		chomp($line);
+		print "Handling tree line: $line\n";
+		$line =~ /^\d+ (tree|blob) ([a-f0-9]*)/ or die "Bad tree entry '$line'!\n";
+		print "Got a $1 of hash $2\n";
+		gettree($2) if $1 eq "tree";
+		getblob($2) if $1 eq "blob";
+	}
+}
+
+sub getcommit($);
+sub getcommit($) {
+	my $hash = shift;
+	my $path = getblob($hash);
+	my $raw = slurp($path);
+	my $commit;
+	Compress::Raw::Zlib::Inflate->new()->inflate($raw, $commit);
+	die "Commit invalid" unless $commit =~ /^commit \d+\0tree (.*)/m;
+	gettree($1);
+	my @parents = ($commit =~ /^parent (.*)$/mg);
+	getcommit($_) for @parents;
+}
+
+sub usage {
+	die "Usage: git init foo;cd foo;$0 http://example.com/gitrepo/ <hash>;git checkout <hash>\n"
+}
+
+usage unless @ARGV == 2;
+
+$baseurl = shift;
+my $firsthash = shift;
+
+getcommit($firsthash);
+
+print "Done!\n";
